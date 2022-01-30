@@ -10,21 +10,18 @@
 #include "soc/rtc_cntl_reg.h"
 #include "soc/sens_reg.h"
 #include "soc/rtc_periph.h"
-#if CONFIG_IDF_TARGET_ESP32S2
-#include "esp32s2/ulp.h"
-#include "esp32s2/ulp_riscv.h"
-#elif CONFIG_IDF_TARGET_ESP32S3
-#include "esp32s3/ulp.h"
-#include "esp32s3/ulp_riscv.h"
-#endif
+#include "ulp_riscv.h"
 #include "ulp_test_app.h"
 #include "unity.h"
 #include <sys/time.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 typedef enum{
     RISCV_READ_WRITE_TEST = 1,
     RISCV_DEEP_SLEEP_WAKEUP_TEST,
     RISCV_LIGHT_SLEEP_WAKEUP_TEST,
+    RISCV_STOP_TEST,
     RISCV_NO_COMMAND,
 } riscv_test_commands_t;
 
@@ -54,7 +51,7 @@ static void load_and_start_ulp_firmware(void)
     }
 }
 
-TEST_CASE("ULP-RISC-V and main CPU are able to exchange data", "[ulp][ignore]")
+TEST_CASE("ULP-RISC-V and main CPU are able to exchange data", "[ulp]")
 {
     const uint32_t test_data = 0x12345678;
     struct timeval start, end;
@@ -92,7 +89,7 @@ TEST_CASE("ULP-RISC-V and main CPU are able to exchange data", "[ulp][ignore]")
     ulp_main_cpu_command = RISCV_NO_COMMAND;
 }
 
-TEST_CASE("ULP-RISC-V is able to wakeup main CPU from light sleep", "[ulp][ignore]")
+TEST_CASE("ULP-RISC-V is able to wakeup main CPU from light sleep", "[ulp]")
 {
     struct timeval start, end;
 
@@ -126,6 +123,71 @@ TEST_CASE("ULP-RISC-V is able to wakeup main CPU from light sleep", "[ulp][ignor
     ulp_main_cpu_command = RISCV_NO_COMMAND;
 }
 
+static bool ulp_riscv_is_running(void)
+{
+    uint32_t start_cnt = ulp_riscv_counter;
+
+    /* Wait a few ULP wakeup cycles to ensure ULP has run */
+    vTaskDelay((5 * ULP_WAKEUP_PERIOD / 1000) / portTICK_PERIOD_MS);
+
+    uint32_t end_cnt = ulp_riscv_counter;
+    printf("start run count: %d, end run count %d\n", start_cnt, end_cnt);
+
+    /* If the ulp is running the counter should have been incremented */
+    return (start_cnt != end_cnt);
+}
+
+TEST_CASE("ULP-RISC-V can be stopped and resumed from main CPU", "[ulp]")
+{
+    /* Load ULP RISC-V firmware and start the ULP RISC-V Coprocessor */
+    load_and_start_ulp_firmware();
+
+    TEST_ASSERT(ulp_riscv_is_running());
+
+    printf("Stopping the ULP\n");
+    ulp_riscv_timer_stop();
+    ulp_riscv_halt();
+
+    TEST_ASSERT(!ulp_riscv_is_running());
+
+    printf("Resuming the ULP\n");
+    ulp_riscv_timer_resume();
+
+    TEST_ASSERT(ulp_riscv_is_running());
+}
+
+TEST_CASE("ULP-RISC-V can stop itself and be resumed from the main CPU", "[ulp]")
+{
+    volatile riscv_test_commands_t *command_resp = &ulp_command_resp;
+
+    /* Load ULP RISC-V firmware and start the ULP RISC-V Coprocessor */
+    load_and_start_ulp_firmware();
+
+    TEST_ASSERT(ulp_riscv_is_running());
+
+    printf("Stopping the ULP\n");
+    /* Setup test data */
+    ulp_main_cpu_command = RISCV_STOP_TEST;
+
+    while (*command_resp != RISCV_STOP_TEST) {
+    }
+
+    /* Wait a bit to ensure ULP finished shutting down */
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+
+    TEST_ASSERT(!ulp_riscv_is_running());
+
+    printf("Resuming the ULP\n");
+    ulp_main_cpu_command = RISCV_NO_COMMAND;
+    ulp_riscv_timer_resume();
+
+    TEST_ASSERT(ulp_riscv_is_running());
+}
+
+/*
+* Keep this test case as the last test case in this suite as a CPU reset occurs.
+* Add new test cases above in order to ensure they run when all test cases are run together.
+*/
 TEST_CASE("ULP-RISC-V is able to wakeup main CPU from deep sleep", "[ulp][reset=SW_CPU_RESET][ignore]")
 {
     /* Load ULP RISC-V firmware and start the ULP RISC-V Coprocessor */
